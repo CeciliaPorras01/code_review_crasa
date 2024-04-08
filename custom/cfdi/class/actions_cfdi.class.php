@@ -116,10 +116,47 @@ class ActionsCfdi
 				}
 				
 			}else if($action == 'confirm_CancelSat' && GETPOST('confirm', 'alpha') == 'yes' ){
-				require_once DOL_DOCUMENT_ROOT."/custom/createevents/events.class.php";
-				$actioncomm = new events($db);
-				$actioncomm->createActionBillCancel($user, $object);
-				$this->buildCFDICancel($object,$action);
+			
+				$close_code = GETPOST("close_code", 'restricthtml');
+				$close_note = GETPOST("close_note", 'restricthtml');
+				$id = GETPOST('facid');
+
+				if (!empty($close_code)) {
+					require_once DOL_DOCUMENT_ROOT . "/custom/createevents/events.class.php";
+					$actioncomm = new events($db);
+					$actioncomm->createActionBillCancel($user, $object);
+					$this->buildCFDICancel($object, $action);
+
+					if (!empty($close_code)) {
+						$result = $object->setCanceled($user, $close_code, $close_note);
+						if ($result < 0) {
+							setEventMessages($object->error, $object->errors, 'errors');
+						}
+					}
+
+					require_once DOL_DOCUMENT_ROOT . '/custom/class/bookkepingFunctions.class.php';
+					$poliza = new BookKeepingFunctions($db);
+
+					$resultado = $poliza->cancelarPoliza($id);
+					if ($resultado > 0) {
+						$poliza->getCancelParameters($object, $id);
+					} else {
+						$setdatos = $poliza->cancelarDatosPoliza($id);
+					}
+
+
+					$sql = 'UPDATE ' . MAIN_DB_PREFIX . 'facture SET';
+					$sql .= ' fk_statut= 6';
+					$sql .= " WHERE rowid = " . ((int) $id);
+					$resql = $this->db->query($sql);
+
+					header("Location: " . $_SERVER['PHP_SELF'] . '?facid=' . $id);
+					exit;
+				} else {
+					setEventMessages($langs->trans("ErrorFieldRequired", $langs->transnoentitiesnoconv("Reason")), null, 'errors');
+					header("Location: " . $_SERVER['PHP_SELF'] . '?facid=' . $id);
+					exit;
+				}
 			}
 			
 		}
@@ -260,7 +297,7 @@ class ActionsCfdi
 				// do timbre in SAT
 				$form_question = $this->questionCancelSAT($object);
 				$formconfirm = "";
-				$formconfirm = $form->formconfirm($_SERVER['PHP_SELF'] . '?facid=' . $object->id, "Cancelar", "¿Desea cancelar esta factura en el SAT?", 'confirm_CancelSat', $form_question, 0, 1,0);
+				$formconfirm = $form->formconfirm($_SERVER['PHP_SELF'] . '?facid=' . $object->id, "Cancelar", "<br>¿Desea cancelar esta factura en el SAT?<br><b>(Se creará póliza de cancelación)</b>", 'confirm_CancelSat', $form_question, 100, 1, 350);
 				$this->resprints = $formconfirm;
 			}
 		}
@@ -279,53 +316,83 @@ class ActionsCfdi
 	 * Build question to ask reason of Cancel in sat 
 	 */
 	public function questionCancelSAT($object){
+		
+		global $langs;
+
+		require_once DOL_DOCUMENT_ROOT . '/core/class/html.formfile.class.php';
+		$form = new Form($db);
+
 		$db = $this->db;
 		$form_question = array();
-        $reason = array(
-                "01" => "01 Comprobantes emitidos con errores con relación",
-                "02" => "02 Comprobantes emitidos con errores sin relación",
-                "03" => "03 No se llevó a cabo la operación",
-                "04" => "04 Operación nominativa relacionada en una factura global");                
+
+		$hoy = dol_now();
+		// Code
+		$close[1]['code'] = 'badcustomer';
+		$close[2]['code'] = 'abandon';
+		// Help
+		$close[1]['label'] = $langs->trans("ConfirmClassifyPaidPartiallyReasonBadCustomerDesc");
+		$close[2]['label'] = $langs->trans("ConfirmClassifyAbandonReasonOtherDesc");
+		// Texte
+		$close[1]['reason2'] = $form->textwithpicto($langs->transnoentities("ConfirmClassifyPaidPartiallyReasonBadCustomer", $object->ref), $close[1]['label'], 1);
+		$close[2]['reason2'] = $form->textwithpicto($langs->transnoentities("ConfirmClassifyAbandonReasonOther"), $close[2]['label'], 1);
+		// arrayreasons
+		$arrayreasons[$close[1]['code']] = $close[1]['reason2'];
+		$arrayreasons[$close[2]['code']] = $close[2]['reason2'];
+
+		// Cree un tableau formulaire
+		$form_question = array(
+			array('type' => 'radio', 'name' => 'close_code', 'label' => $langs->trans("Reason"), 'values' => $arrayreasons, 'required' => 'required'),
+			array('name' => 'close_date', 'type' => 'date', 'label' => $langs->trans('Fecha'), 'value' => $hoy),
+			array('type' => 'text', 'name' => 'close_note', 'label' => $langs->trans("Comment"), 'value' => '', 'morecss' => 'minwidth300')
+		);
 
 
-        $form_question['reason'] = array(
-        'name' => 'reason',
-        'type' => 'select',
-        'label' => 'Motivo',
-        'values' => $reason,
-        'default' => '200',
-		'size'=>'500',
-		'morecss'=>'minwidth300'
-        );
+		$reason = array(
+			"01" => "01 Comprobantes emitidos con errores con relación",
+			"02" => "02 Comprobantes emitidos con errores sin relación",
+			"03" => "03 No se llevó a cabo la operación",
+			"04" => "04 Operación nominativa relacionada en una factura global"
+		);
 
 
-        $sql= " select a.ref, b.uuid ";
-        $sql.= " from ".MAIN_DB_PREFIX."facture a inner join ".MAIN_DB_PREFIX."facture_extrafields b ";
-        $sql.= " on a.rowid = b.fk_object inner join ".MAIN_DB_PREFIX."societe c ";
-        $sql.= " on a.fk_soc = c.rowid ";
-        $sql.= " where a.rowid != ".$object->id." ";
-        $sql.= " and 	c.rowid = (select fk_soc from ".MAIN_DB_PREFIX."facture where rowid = ".$object->id.") ";
-        $sql.= " and a.type = 0 ";
-        $sql.= " and b.uuid is not null ";
-        $sql.= " order by a.rowid desc ";
+		$form_question['reason'] = array(
+			'name' => 'reason',
+			'type' => 'select',
+			'label' => 'Motivo',
+			'values' => $reason,
+			'default' => '200',
+			'size' => '500',
+			'morecss' => 'minwidth300'
+		);
 
-        $uuid=$db->query($sql);
-        $objUuid=$uuid->fetch_all(MYSQLI_ASSOC);		                
-        $uuidArray = array();
 
-        foreach ($objUuid as $key => $value) {                    
-                $uuidArray[$value['uuid']] = "|".$value['ref']."|".$value['uuid'];
-        }
-        $form_question['uuid'] = array(
-        'name' => 'UUID',
-        'type' => 'select',
-        'label' => 'Sustituye a UUID',
-        'values' => $uuidArray,
-        'default' => '',
-		'morecss'=>'minwidth300'
-        );
+		$sql = " select a.ref, b.uuid ";
+		$sql .= " from " . MAIN_DB_PREFIX . "facture a inner join " . MAIN_DB_PREFIX . "facture_extrafields b ";
+		$sql .= " on a.rowid = b.fk_object inner join " . MAIN_DB_PREFIX . "societe c ";
+		$sql .= " on a.fk_soc = c.rowid ";
+		$sql .= " where a.rowid != " . $object->id . " ";
+		$sql .= " and 	c.rowid = (select fk_soc from " . MAIN_DB_PREFIX . "facture where rowid = " . $object->id . ") ";
+		$sql .= " and a.type = 0 ";
+		$sql .= " and b.uuid is not null ";
+		$sql .= " order by a.rowid desc ";
 
-		return   $form_question;
+		$uuid = $db->query($sql);
+		$objUuid = $uuid->fetch_all(MYSQLI_ASSOC);
+		$uuidArray = array();
+
+		foreach ($objUuid as $key => $value) {
+			$uuidArray[$value['uuid']] = "|" . $value['ref'] . "|" . $value['uuid'];
+		}
+		$form_question['uuid'] = array(
+			'name' => 'UUID',
+			'type' => 'select',
+			'label' => 'Sustituye a UUID',
+			'values' => $uuidArray,
+			'default' => '',
+			'morecss' => 'minwidth300'
+		);
+
+		return $form_question;
 
 	}
 

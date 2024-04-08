@@ -41,6 +41,9 @@ require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
 require_once DOL_DOCUMENT_ROOT.'/societe/class/client.class.php';
 require_once DOL_DOCUMENT_ROOT.'/accountancy/class/bookkeeping.class.php';
 
+require_once DOL_DOCUMENT_ROOT . '/custom/class/bookkepingFunctions.class.php';//CC
+
+
 // Load translation files required by the page
 $langs->loadLangs(array("commercial", "compta", "bills", "other", "accountancy", "errors"));
 
@@ -299,294 +302,31 @@ foreach ($tabfac as $key => $val) {		// Loop on each invoice
 //var_dump($errorforinvoice);exit;
 
 
+
+//CC
+$poliza = new BookKeepingFunctions($db);
 // Bookkeeping Write
 if ($action == 'writebookkeeping') {
-	$now = dol_now();
-	$error = 0;
+	
+	//Verifica que contenga un uuid asi como la cancelación directamente de la card de la factura 
+	$resultado = $poliza->verificarCancelacion($key);
 
-	$companystatic = new Societe($db);
-	$invoicestatic = new Facture($db);
-	$accountingaccountcustomer = new AccountingAccount($db);
+	if ($resultado > 0) {
+		$poliza->crearPoliza($object, $tabcompany, $tabfac, $tabttc, $tabht, $tabtva, $tablocaltax1, $tablocaltax2, $def_tva, $journal, $journal_label);
+	
+		// Verifica qu la factura exista dentro de diarios
+		$cancelacion = $poliza->cancelarPoliza($key);
 
-	$accountingaccountcustomer->fetch(null, $conf->global->ACCOUNTING_ACCOUNT_CUSTOMER, true);
-
-	foreach ($tabfac as $key => $val) {		// Loop on each invoice
-		$errorforline = 0;
-
-		$totalcredit = 0;
-		$totaldebit = 0;
-
-		$db->begin();
-
-		$companystatic->id = $tabcompany[$key]['id'];
-		$companystatic->name = $tabcompany[$key]['name'];
-		$companystatic->code_compta = $tabcompany[$key]['code_compta'];
-		$companystatic->code_client = $tabcompany[$key]['code_client'];
-		$companystatic->client = 3;
-
-		$invoicestatic->id = $key;
-		$invoicestatic->ref = (string) $val["ref"];
-		$invoicestatic->type = $val["type"];
-		$invoicestatic->close_code = $val["close_code"];
-
-		$date = dol_print_date($val["date"], 'day');
-
-		// Is it a replaced invoice ? 0=not a replaced invoice, 1=replaced invoice not yet dispatched, 2=replaced invoice dispatched
-		$replacedinvoice = 0;
-		if ($invoicestatic->close_code == Facture::CLOSECODE_REPLACED) {
-			$replacedinvoice = 1;
-			$alreadydispatched = $invoicestatic->getVentilExportCompta(); // Test if replaced invoice already into bookkeeping.
-			if ($alreadydispatched) {
-				$replacedinvoice = 2;
-			}
+		if ($cancelacion > 0) {
+			//Obtiene los respectivos valores para crear la poliza de cancelación de facturas
+			$poliza->getCancelParameters($object,$key);
 		}
 
-		// If not already into bookkeeping, we won't add it. If yes, do nothing (should not happen because creating replacement not possible if invoice is accounted)
-		if ($replacedinvoice == 1) {
-			$db->rollback();
-			continue;
-		}
-
-		// Error if some lines are not binded/ready to be journalized
-		if ($errorforinvoice[$key] == 'somelinesarenotbound') {
-			$error++;
-			$errorforline++;
-			setEventMessages($langs->trans('ErrorInvoiceContainsLinesNotYetBounded', $val['ref']), null, 'errors');
-		}
-
-		// Thirdparty
-		if (!$errorforline) {
-			foreach ($tabttc[$key] as $k => $mt) {
-				$bookkeeping = new BookKeeping($db);
-				$bookkeeping->doc_date = $val["date"];
-				$bookkeeping->date_lim_reglement = $val["datereg"];
-				$bookkeeping->doc_ref = $val["ref"];
-				$bookkeeping->date_creation = $now;
-				$bookkeeping->doc_type = 'customer_invoice';
-				$bookkeeping->fk_doc = $key;
-				$bookkeeping->fk_docdet = 0; // Useless, can be several lines that are source of this record to add
-				$bookkeeping->thirdparty_code = $companystatic->code_client;
-
-				$bookkeeping->subledger_account = $tabcompany[$key]['code_compta'];
-				$bookkeeping->subledger_label = $tabcompany[$key]['name'];
-
-				$bookkeeping->numero_compte = $tabcompany[$key]['code_compta'];//$conf->global->ACCOUNTING_ACCOUNT_CUSTOMER;
-				$bookkeeping->label_compte = $tabcompany[$key]['name']; // $accountingaccountcustomer->label;
-
-				$bookkeeping->label_operation = dol_trunc($companystatic->name, 16).' - '.$invoicestatic->ref.' - '.$langs->trans("SubledgerAccount");
-				$bookkeeping->montant = $mt;
-				$bookkeeping->sens = ($mt >= 0) ? 'D' : 'C';
-				$bookkeeping->debit = ($mt >= 0) ? $mt : 0;
-				$bookkeeping->credit = ($mt < 0) ? -$mt : 0;
-				$bookkeeping->code_journal = $journal;
-				$bookkeeping->journal_label = $langs->transnoentities($journal_label);
-				$bookkeeping->fk_user_author = $user->id;
-				$bookkeeping->entity = $conf->entity;
-
-				$totaldebit += $bookkeeping->debit;
-				$totalcredit += $bookkeeping->credit;
-
-				$result = $bookkeeping->create($user);
-				if ($result < 0) {
-					if ($bookkeeping->error == 'BookkeepingRecordAlreadyExists') {	// Already exists
-						$error++;
-						$errorforline++;
-						$errorforinvoice[$key] = 'alreadyjournalized';
-						//setEventMessages('Transaction for ('.$bookkeeping->doc_type.', '.$bookkeeping->fk_doc.', '.$bookkeeping->fk_docdet.') were already recorded', null, 'warnings');
-					} else {
-						$error++;
-						$errorforline++;
-						$errorforinvoice[$key] = 'other';
-						setEventMessages($bookkeeping->error, $bookkeeping->errors, 'errors');
-					}
-				} else {
-					if (getDolGlobalInt('ACCOUNTING_ENABLE_LETTERING') && getDolGlobalInt('ACCOUNTING_ENABLE_AUTOLETTERING')) {
-						require_once DOL_DOCUMENT_ROOT . '/accountancy/class/lettering.class.php';
-						$lettering_static = new Lettering($db);
-
-						$nb_lettering = $lettering_static->bookkeepingLettering(array($bookkeeping->id));
-					}
-				}
-			}
-		}
-
-		// Product / Service
-		if (!$errorforline) {
-			foreach ($tabht[$key] as $k => $mt) {
-				$resultfetch = $accountingaccount->fetch(null, $k, true);	// TODO Use a cache
-				$label_account = $accountingaccount->label;
-
-				// get compte id and label
-				if ($resultfetch > 0) {
-					$bookkeeping = new BookKeeping($db);
-					$bookkeeping->doc_date = $val["date"];
-					$bookkeeping->date_lim_reglement = $val["datereg"];
-					$bookkeeping->doc_ref = $val["ref"];
-					$bookkeeping->date_creation = $now;
-					$bookkeeping->doc_type = 'customer_invoice';
-					$bookkeeping->fk_doc = $key;
-					$bookkeeping->fk_docdet = 0; // Useless, can be several lines that are source of this record to add
-					$bookkeeping->thirdparty_code = $companystatic->code_client;
-
-					if (!empty($conf->global->ACCOUNTING_ACCOUNT_CUSTOMER_USE_AUXILIARY_ON_DEPOSIT)) {
-						if ($k == getDolGlobalString('ACCOUNTING_ACCOUNT_CUSTOMER_DEPOSIT')) {
-							$bookkeeping->subledger_account = $tabcompany[$key]['code_compta'];
-							$bookkeeping->subledger_label = $tabcompany[$key]['name'];
-						} else {
-							$bookkeeping->subledger_account = '';
-							$bookkeeping->subledger_label = '';
-						}
-					} else {
-						$bookkeeping->subledger_account = '';
-						$bookkeeping->subledger_label = '';
-					}
-
-					$bookkeeping->numero_compte = $k;
-					$bookkeeping->label_compte = $label_account;
-
-					$bookkeeping->label_operation = dol_trunc($companystatic->name, 16).' - '.$invoicestatic->ref.' - '.$label_account;
-					$bookkeeping->montant = $mt;
-					$bookkeeping->sens = ($mt < 0) ? 'D' : 'C';
-					$bookkeeping->debit = ($mt < 0) ? -$mt : 0;
-					$bookkeeping->credit = ($mt >= 0) ? $mt : 0;
-					$bookkeeping->code_journal = $journal;
-					$bookkeeping->journal_label = $langs->transnoentities($journal_label);
-					$bookkeeping->fk_user_author = $user->id;
-					$bookkeeping->entity = $conf->entity;
-
-					$totaldebit += $bookkeeping->debit;
-					$totalcredit += $bookkeeping->credit;
-
-					$result = $bookkeeping->create($user);
-					if ($result < 0) {
-						if ($bookkeeping->error == 'BookkeepingRecordAlreadyExists') {	// Already exists
-							$error++;
-							$errorforline++;
-							$errorforinvoice[$key] = 'alreadyjournalized';
-							//setEventMessages('Transaction for ('.$bookkeeping->doc_type.', '.$bookkeeping->fk_doc.', '.$bookkeeping->fk_docdet.') were already recorded', null, 'warnings');
-						} else {
-							$error++;
-							$errorforline++;
-							$errorforinvoice[$key] = 'other';
-							setEventMessages($bookkeeping->error, $bookkeeping->errors, 'errors');
-						}
-					}
-				}
-			}
-		}
-
-		// VAT
-		if (!$errorforline) {
-			$listoftax = array(0, 1, 2);
-			foreach ($listoftax as $numtax) {
-				$arrayofvat = $tabtva;
-				if ($numtax == 1) {
-					$arrayofvat = $tablocaltax1;
-				}
-				if ($numtax == 2) {
-					$arrayofvat = $tablocaltax2;
-				}
-
-				foreach ($arrayofvat[$key] as $k => $mt) {
-					if ($mt) {
-						$accountingaccount->fetch(null, $k, true);	// TODO Use a cache for label
-						$label_account = $accountingaccount->label;
-
-						$bookkeeping = new BookKeeping($db);
-						$bookkeeping->doc_date = $val["date"];
-						$bookkeeping->date_lim_reglement = $val["datereg"];
-						$bookkeeping->doc_ref = $val["ref"];
-						$bookkeeping->date_creation = $now;
-						$bookkeeping->doc_type = 'customer_invoice';
-						$bookkeeping->fk_doc = $key;
-						$bookkeeping->fk_docdet = 0; // Useless, can be several lines that are source of this record to add
-						$bookkeeping->thirdparty_code = $companystatic->code_client;
-
-						$bookkeeping->subledger_account = '';
-						$bookkeeping->subledger_label = '';
-
-						$bookkeeping->numero_compte = $k;
-						$bookkeeping->label_compte = $label_account;
-
-						$bookkeeping->label_operation = dol_trunc($companystatic->name, 16).' - '.$invoicestatic->ref.' - '.$langs->trans("VAT").' '.join(', ', $def_tva[$key][$k]).' %'.($numtax ? ' - Localtax '.$numtax : '');
-						$bookkeeping->montant = $mt;
-						$bookkeeping->sens = ($mt < 0) ? 'D' : 'C';
-						$bookkeeping->debit = ($mt < 0) ? -$mt : 0;
-						$bookkeeping->credit = ($mt >= 0) ? $mt : 0;
-						$bookkeeping->code_journal = $journal;
-						$bookkeeping->journal_label = $langs->transnoentities($journal_label);
-						$bookkeeping->fk_user_author = $user->id;
-						$bookkeeping->entity = $conf->entity;
-
-						$totaldebit += $bookkeeping->debit;
-						$totalcredit += $bookkeeping->credit;
-
-						$result = $bookkeeping->create($user);
-						if ($result < 0) {
-							if ($bookkeeping->error == 'BookkeepingRecordAlreadyExists') {	// Already exists
-								$error++;
-								$errorforline++;
-								$errorforinvoice[$key] = 'alreadyjournalized';
-								//setEventMessages('Transaction for ('.$bookkeeping->doc_type.', '.$bookkeeping->fk_doc.', '.$bookkeeping->fk_docdet.') were already recorded', null, 'warnings');
-							} else {
-								$error++;
-								$errorforline++;
-								$errorforinvoice[$key] = 'other';
-								setEventMessages($bookkeeping->error, $bookkeeping->errors, 'errors');
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Protection against a bug on lines before
-		if (!$errorforline && (price2num($totaldebit, 'MT') != price2num($totalcredit, 'MT'))) {
-			$error++;
-			$errorforline++;
-			$errorforinvoice[$key] = 'amountsnotbalanced';
-			setEventMessages('Try to insert a non balanced transaction in book for '.$invoicestatic->ref.'. Canceled. Surely a bug.', null, 'errors');
-		}
-
-		if (!$errorforline) {
-			$db->commit();
-		} else {
-			$db->rollback();
-
-			if ($error >= 10) {
-				setEventMessages($langs->trans("ErrorTooManyErrorsProcessStopped"), null, 'errors');
-				break; // Break in the foreach
-			}
-		}
-	}
-
-	$tabpay = $tabfac;
-
-	if (empty($error) && count($tabpay) > 0) {
-		setEventMessages($langs->trans("GeneralLedgerIsWritten"), null, 'mesgs');
-	} elseif (count($tabpay) == $error) {
-		setEventMessages($langs->trans("NoNewRecordSaved"), null, 'warnings');
 	} else {
-		setEventMessages($langs->trans("GeneralLedgerSomeRecordWasNotRecorded"), null, 'warnings');
-	}
-
-	$action = '';
-
-	// Must reload data, so we make a redirect
-	if (count($tabpay) != $error) {
-		$param = 'id_journal='.$id_journal;
-		$param .= '&date_startday='.$date_startday;
-		$param .= '&date_startmonth='.$date_startmonth;
-		$param .= '&date_startyear='.$date_startyear;
-		$param .= '&date_endday='.$date_endday;
-		$param .= '&date_endmonth='.$date_endmonth;
-		$param .= '&date_endyear='.$date_endyear;
-		$param .= '&in_bookkeeping='.$in_bookkeeping;
-		header("Location: ".$_SERVER['PHP_SELF'].($param ? '?'.$param : ''));
-		exit;
+		$poliza->crearPoliza($object, $tabcompany, $tabfac, $tabttc, $tabht, $tabtva, $tablocaltax1, $tablocaltax2, $def_tva, $journal, $journal_label);
 	}
 }
-
+//CC
 
 
 /*
