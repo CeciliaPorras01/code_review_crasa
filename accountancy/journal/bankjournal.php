@@ -62,6 +62,11 @@ require_once DOL_DOCUMENT_ROOT.'/loan/class/loan.class.php';
 require_once DOL_DOCUMENT_ROOT.'/loan/class/paymentloan.class.php';
 require_once DOL_DOCUMENT_ROOT.'/adherents/class/subscription.class.php';
 
+
+//CC
+require_once DOL_DOCUMENT_ROOT . "/custom/createevents/events.class.php";
+
+
 // Load translation files required by the page
 $langs->loadLangs(array("companies", "other", "compta", "banks", "bills", "donations", "loan", "accountancy", "trips", "salaries", "hrm", "members"));
 
@@ -583,326 +588,40 @@ if ($result) {
 
 // Write bookkeeping
 if (!$error && $action == 'writebookkeeping') {
-	$now = dol_now();
+	//CC
 
-	$accountingaccountcustomer = new AccountingAccount($db);
-	$accountingaccountcustomer->fetch(null, $conf->global->ACCOUNTING_ACCOUNT_CUSTOMER, true);
+	$actioncomm = new events($db);
 
-	$accountingaccountsupplier = new AccountingAccount($db);
-	$accountingaccountsupplier->fetch(null, $conf->global->ACCOUNTING_ACCOUNT_SUPPLIER, true);
-
-	$accountingaccountpayment = new AccountingAccount($db);
-	$accountingaccountpayment->fetch(null, $conf->global->SALARIES_ACCOUNTING_ACCOUNT_PAYMENT, true);
-
-	$accountingaccountsuspense = new AccountingAccount($db);
-	$accountingaccountsuspense->fetch(null, $conf->global->ACCOUNTING_ACCOUNT_SUSPENSE, true);
-
-	$error = 0;
-	foreach ($tabpay as $key => $val) {		// $key is rowid into llx_bank
+	foreach ($tabpay as $key => $val) {
 		$date = dol_print_date($db->jdate($val["date"]), 'day');
-
-		$ref = getSourceDocRef($val, $tabtype[$key]);
-
-		$errorforline = 0;
-
-		$totalcredit = 0;
-		$totaldebit = 0;
-
-		$db->begin();
-
-		// Introduce a protection. Total of tabtp must be total of tabbq
-		//var_dump($tabpay);
-		//var_dump($tabtp);
-		//var_dump($tabbq);exit;
-
-		// Bank
-		if (!$errorforline && is_array($tabbq[$key])) {
-			// Line into bank account
-			foreach ($tabbq[$key] as $k => $mt) {
-				if ($mt) {
-					$accountingaccount->fetch(null, $k, true);	// $k is accounting bank account. TODO We should use a cache here to avoid this fetch
-					$account_label = $accountingaccount->label;
-
-					$reflabel = '';
-					if (!empty($val['lib'])) {
-						$reflabel .= dol_string_nohtmltag($val['lib'])." - ";
-					}
-					$reflabel .= $langs->trans("Bank").' '.dol_string_nohtmltag($val['bank_account_ref']);
-					if (!empty($val['soclib'])) {
-						$reflabel .= " - ".dol_string_nohtmltag($val['soclib']);
-					}
-
-					$bookkeeping = new BookKeeping($db);
-					$bookkeeping->doc_date = $val["date"];
-					$bookkeeping->doc_ref = $ref;
-					$bookkeeping->doc_type = 'bank';
-					$bookkeeping->fk_doc = $key;
-					$bookkeeping->fk_docdet = $val["fk_bank"];
-
-					$bookkeeping->numero_compte = $k;
-					$bookkeeping->label_compte = $account_label;
-
-					$bookkeeping->label_operation = $reflabel;
-					$bookkeeping->montant = $mt;
-					$bookkeeping->sens = ($mt >= 0) ? 'D' : 'C';
-					$bookkeeping->debit = ($mt >= 0 ? $mt : 0);
-					$bookkeeping->credit = ($mt < 0 ? -$mt : 0);
-					$bookkeeping->code_journal = $journal;
-					$bookkeeping->journal_label = $langs->transnoentities($journal_label);
-					$bookkeeping->fk_user_author = $user->id;
-					$bookkeeping->date_creation = $now;
-
-					// No subledger_account value for the bank line but add a specific label_operation
-					$bookkeeping->subledger_account = '';
-					$bookkeeping->label_operation = $reflabel;
-					$bookkeeping->entity = $conf->entity;
-
-					$totaldebit += $bookkeeping->debit;
-					$totalcredit += $bookkeeping->credit;
-
-					$result = $bookkeeping->create($user);
-					if ($result < 0) {
-						if ($bookkeeping->error == 'BookkeepingRecordAlreadyExists') {	// Already exists
-							$error++;
-							$errorforline++;
-							setEventMessages('Transaction for ('.$bookkeeping->doc_type.', '.$bookkeeping->fk_doc.', '.$bookkeeping->fk_docdet.') were already recorded', null, 'warnings');
-						} else {
-							$error++;
-							$errorforline++;
-							setEventMessages($bookkeeping->error, $bookkeeping->errors, 'errors');
-						}
-					}
-				}
-			}
-		}
-
-		// Third party
-		if (!$errorforline) {
-			if (is_array($tabtp[$key])) {
-				// Line into thirdparty account
-				foreach ($tabtp[$key] as $k => $mt) {
-					if ($mt) {
-						$lettering = false;
-
-						$reflabel = '';
-						if (!empty($val['lib'])) {
-							$reflabel .= dol_string_nohtmltag($val['lib']).($val['soclib'] ? " - " : "");
-						}
-						if ($tabtype[$key] == 'banktransfert') {
-							$reflabel .= dol_string_nohtmltag($langs->transnoentitiesnoconv('TransitionalAccount').' '.$account_transfer);
-						} else {
-							$reflabel .= dol_string_nohtmltag($val['soclib']);
-						}
-
-						$bookkeeping = new BookKeeping($db);
-						$bookkeeping->doc_date = $val["date"];
-						$bookkeeping->doc_ref = $ref;
-						$bookkeeping->doc_type = 'bank';
-						$bookkeeping->fk_doc = $key;
-						$bookkeeping->fk_docdet = $val["fk_bank"];
-
-						$bookkeeping->label_operation = $reflabel;
-						$bookkeeping->montant = $mt;
-						$bookkeeping->sens = ($mt < 0) ? 'D' : 'C';
-						$bookkeeping->debit = ($mt < 0 ? -$mt : 0);
-						$bookkeeping->credit = ($mt >= 0) ? $mt : 0;
-						$bookkeeping->code_journal = $journal;
-						$bookkeeping->journal_label = $langs->transnoentities($journal_label);
-						$bookkeeping->fk_user_author = $user->id;
-						$bookkeeping->date_creation = $now;
-
-						if ($tabtype[$key] == 'payment') {	// If payment is payment of customer invoice, we get ref of invoice
-							$lettering = true;
-							$bookkeeping->subledger_account = $k; // For payment, the subledger account is stored as $key of $tabtp
-							$bookkeeping->subledger_label = $tabcompany[$key]['name']; // $tabcompany is defined only if we are sure there is 1 thirdparty for the bank transaction
-							$bookkeeping->numero_compte = $conf->global->ACCOUNTING_ACCOUNT_CUSTOMER;
-							$bookkeeping->label_compte = $accountingaccountcustomer->label;
-						} elseif ($tabtype[$key] == 'payment_supplier') {	// If payment is payment of supplier invoice, we get ref of invoice
-							$lettering = true;
-							$bookkeeping->subledger_account = $k; // For payment, the subledger account is stored as $key of $tabtp
-							$bookkeeping->subledger_label = $tabcompany[$key]['name']; // $tabcompany is defined only if we are sure there is 1 thirdparty for the bank transaction
-							$bookkeeping->numero_compte = $conf->global->ACCOUNTING_ACCOUNT_SUPPLIER;
-							$bookkeeping->label_compte = $accountingaccountsupplier->label;
-						} elseif ($tabtype[$key] == 'payment_expensereport') {
-							$bookkeeping->subledger_account = $tabuser[$key]['accountancy_code'];
-							$bookkeeping->subledger_label = $tabuser[$key]['name'];
-							$bookkeeping->numero_compte = $conf->global->SALARIES_ACCOUNTING_ACCOUNT_PAYMENT;
-							$bookkeeping->label_compte = $accountingaccountpayment->label;
-						} elseif ($tabtype[$key] == 'payment_salary') {
-							$bookkeeping->subledger_account = $tabuser[$key]['accountancy_code'];
-							$bookkeeping->subledger_label = $tabuser[$key]['name'];
-							$bookkeeping->numero_compte = $conf->global->SALARIES_ACCOUNTING_ACCOUNT_PAYMENT;
-							$bookkeeping->label_compte = $accountingaccountpayment->label;
-						} elseif (in_array($tabtype[$key], array('sc', 'payment_sc'))) {   // If payment is payment of social contribution
-							$bookkeeping->subledger_account = '';
-							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(null, $k, true);	// TODO Use a cache
-							$bookkeeping->numero_compte = $k;
-							$bookkeeping->label_compte = $accountingaccount->label;
-						} elseif ($tabtype[$key] == 'payment_vat') {
-							$bookkeeping->subledger_account = '';
-							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(null, $k, true);		// TODO Use a cache
-							$bookkeeping->numero_compte = $k;
-							$bookkeeping->label_compte = $accountingaccount->label;
-						} elseif ($tabtype[$key] == 'payment_donation') {
-							$bookkeeping->subledger_account = '';
-							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(null, $k, true);		// TODO Use a cache
-							$bookkeeping->numero_compte = $k;
-							$bookkeeping->label_compte = $accountingaccount->label;
-						} elseif ($tabtype[$key] == 'member') {
-							$bookkeeping->subledger_account = '';
-							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(null, $k, true);		// TODO Use a cache
-							$bookkeeping->numero_compte = $k;
-							$bookkeeping->label_compte = $accountingaccount->label;
-						} elseif ($tabtype[$key] == 'payment_loan') {
-							$bookkeeping->subledger_account = '';
-							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(null, $k, true);		// TODO Use a cache
-							$bookkeeping->numero_compte = $k;
-							$bookkeeping->label_compte = $accountingaccount->label;
-						} elseif ($tabtype[$key] == 'payment_various') {
-							$bookkeeping->subledger_account = $k;
-							$bookkeeping->subledger_label = $tabcompany[$key]['name'];
-							$accountingaccount->fetch(null, $tabpay[$key]["account_various"], true);	// TODO Use a cache
-							$bookkeeping->numero_compte = $tabpay[$key]["account_various"];
-							$bookkeeping->label_compte = $accountingaccount->label;
-						} elseif ($tabtype[$key] == 'banktransfert') {
-							$bookkeeping->subledger_account = '';
-							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(null, $k, true);		// TODO Use a cache
-							$bookkeeping->numero_compte = $k;
-							$bookkeeping->label_compte = $accountingaccount->label;
-						} else {
-							if ($tabtype[$key] == 'unknown') {	// Unknown transaction, we will use a waiting account for thirdparty.
-								// Temporary account
-								$bookkeeping->subledger_account = '';
-								$bookkeeping->subledger_label = '';
-								$bookkeeping->numero_compte = $conf->global->ACCOUNTING_ACCOUNT_SUSPENSE;
-								$bookkeeping->label_compte = $accountingaccountsuspense->label;
-							}
-						}
-						$bookkeeping->label_operation = $reflabel;
-						$bookkeeping->entity = $conf->entity;
-
-						$totaldebit += $bookkeeping->debit;
-						$totalcredit += $bookkeeping->credit;
-
-						$result = $bookkeeping->create($user);
-						if ($result < 0) {
-							if ($bookkeeping->error == 'BookkeepingRecordAlreadyExists') {	// Already exists
-								$error++;
-								$errorforline++;
-								setEventMessages('Transaction for ('.$bookkeeping->doc_type.', '.$bookkeeping->fk_doc.', '.$bookkeeping->fk_docdet.') were already recorded', null, 'warnings');
-							} else {
-								$error++;
-								$errorforline++;
-								setEventMessages($bookkeeping->error, $bookkeeping->errors, 'errors');
-							}
-						} else {
-							if ($lettering && getDolGlobalInt('ACCOUNTING_ENABLE_LETTERING') && getDolGlobalInt('ACCOUNTING_ENABLE_AUTOLETTERING')) {
-								require_once DOL_DOCUMENT_ROOT . '/accountancy/class/lettering.class.php';
-								$lettering_static = new Lettering($db);
-								$nb_lettering = $lettering_static->bookkeepingLetteringAll(array($bookkeeping->id));
-							}
-						}
-					}
-				}
-			} else {	// If thirdparty unknown, output the waiting account
-				foreach ($tabbq[$key] as $k => $mt) {
-					if ($mt) {
-						$reflabel = '';
-						if (!empty($val['lib'])) {
-							$reflabel .= dol_string_nohtmltag($val['lib'])." - ";
-						}
-						$reflabel .= dol_string_nohtmltag('WaitingAccount');
-
-						$bookkeeping = new BookKeeping($db);
-						$bookkeeping->doc_date = $val["date"];
-						$bookkeeping->doc_ref = $ref;
-						$bookkeeping->doc_type = 'bank';
-						$bookkeeping->fk_doc = $key;
-						$bookkeeping->fk_docdet = $val["fk_bank"];
-						$bookkeeping->montant = $mt;
-						$bookkeeping->sens = ($mt < 0) ? 'D' : 'C';
-						$bookkeeping->debit = ($mt < 0 ? -$mt : 0);
-						$bookkeeping->credit = ($mt >= 0) ? $mt : 0;
-						$bookkeeping->code_journal = $journal;
-						$bookkeeping->journal_label = $langs->transnoentities($journal_label);
-						$bookkeeping->fk_user_author = $user->id;
-						$bookkeeping->date_creation = $now;
-						$bookkeeping->label_compte = '';
-						$bookkeeping->label_operation = $reflabel;
-						$bookkeeping->entity = $conf->entity;
-
-						$totaldebit += $bookkeeping->debit;
-						$totalcredit += $bookkeeping->credit;
-
-						$result = $bookkeeping->create($user);
-
-						if ($result < 0) {
-							if ($bookkeeping->error == 'BookkeepingRecordAlreadyExists') {	// Already exists
-								$error++;
-								$errorforline++;
-								setEventMessages('Transaction for ('.$bookkeeping->doc_type.', '.$bookkeeping->fk_doc.', '.$bookkeeping->fk_docdet.') were already recorded', null, 'warnings');
-							} else {
-								$error++;
-								$errorforline++;
-								setEventMessages($bookkeeping->error, $bookkeeping->errors, 'errors');
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if (price2num($totaldebit, 'MT') != price2num($totalcredit, 'MT')) {
-			$error++;
-			$errorforline++;
-			setEventMessages('Try to insert a non balanced transaction in book for '.$ref.'. Canceled. Surely a bug.', null, 'errors');
-		}
-
-		if (!$errorforline) {
-			$db->commit();
-		} else {
-			//print 'KO for line '.$key.' '.$error.'<br>';
-			$db->rollback();
-
-			$MAXNBERRORS = 5;
-			if ($error >= $MAXNBERRORS) {
-				setEventMessages($langs->trans("ErrorTooManyErrorsProcessStopped").' (>'.$MAXNBERRORS.')', null, 'errors');
-				break; // Break in the foreach
-			}
-		}
 	}
+	
+	$resultado = $actioncomm->verifyCancelPay($key);
 
-	if (empty($error) && count($tabpay) > 0) {
-		setEventMessages($langs->trans("GeneralLedgerIsWritten"), null, 'mesgs');
-	} elseif (count($tabpay) == $error) {
-		setEventMessages($langs->trans("NoNewRecordSaved"), null, 'warnings');
+	if ($resultado > 0) {
+
+		$actioncomm->createPolizaPago($object, $tabpay, $tabbq, $tabtp, $tabtype, $journal, $journal_label);
+	
+		$result = $actioncomm->cancelarPoliza($obj->rowid);
+		if ($result > 0) {
+
+			$date =  $actioncomm->getDatecancel($key);
+			$cancel = $actioncomm->transformPolizaPay($key, $date);
+			
+			if ($cancel > 0) {
+				setEventMessages($langs->trans("Se genero la cancelación"), null, 'mesgs');
+			} else {
+				setEventMessages($langs->trans("Ya existe una poliza de cancelación "), null, 'warnings');
+			}
+		}
 	} else {
-		setEventMessages($langs->trans("GeneralLedgerSomeRecordWasNotRecorded"), null, 'warnings');
+		
+		$actioncomm->createPolizaPago($object, $tabpay, $tabbq, $tabtp, $tabtype, $journal, $journal_label);
 	}
 
-	$action = '';
+	//CC
 
-	// Must reload data, so we make a redirect
-	if (count($tabpay) != $error) {
-		$param = 'id_journal='.$id_journal;
-		$param .= '&date_startday='.$date_startday;
-		$param .= '&date_startmonth='.$date_startmonth;
-		$param .= '&date_startyear='.$date_startyear;
-		$param .= '&date_endday='.$date_endday;
-		$param .= '&date_endmonth='.$date_endmonth;
-		$param .= '&date_endyear='.$date_endyear;
-		$param .= '&in_bookkeeping='.$in_bookkeeping;
-		header("Location: ".$_SERVER['PHP_SELF'].($param ? '?'.$param : ''));
-		exit;
-	}
 }
-
 
 
 // Export
